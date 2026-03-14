@@ -50,10 +50,45 @@ export function useRevenueCatController(appUserID, authReady) {
   const configuringRef = useRef(false);
   const currentUserRef = useRef(null);
   const revenueCatApiKey = useMemo(() => getRevenueCatApiKey(), []);
+  const logPremiumOfferingsDebug = useCallback((sourceLabel, offeringsPayload) => {
+    try {
+      const allOfferings = offeringsPayload?.all || {};
+      const currentOfferingIdentifier =
+        offeringsPayload?.current?.identifier || offeringsPayload?.currentOfferingIdentifier || null;
+      const availablePackageIds = Object.values(allOfferings).flatMap((offering) =>
+        (offering?.availablePackages || []).map(
+          (pkg) => pkg?.identifier || pkg?.packageIdentifier || pkg?.product?.identifier || "unknown"
+        )
+      );
+      const currentPackageIds = (offeringsPayload?.current?.availablePackages || []).map(
+        (pkg) => pkg?.identifier || pkg?.packageIdentifier || pkg?.product?.identifier || "unknown"
+      );
+      const mergedPackageIds = [...new Set([...currentPackageIds, ...availablePackageIds])];
+      const hasRcMonthly = mergedPackageIds.includes(REVENUECAT_CONFIG.packageIds.premium);
+      console.log("[RC DEBUG]", sourceLabel, {
+        configured: isConfigured,
+        offeringShape: {
+          hasCurrent: Boolean(offeringsPayload?.current),
+          allOfferingIds: Object.keys(allOfferings),
+        },
+        offeringsPayload,
+        currentOfferingIdentifier,
+        availablePackageIds: mergedPackageIds,
+        premiumPackageIdentifier: REVENUECAT_CONFIG.packageIds.premium,
+        premiumPackageFound: hasRcMonthly,
+      });
+    } catch (debugError) {
+      console.log("[RC DEBUG] offerings debug log error:", debugError?.message || debugError);
+    }
+  }, [isConfigured]);
 
   useEffect(() => {
     const Purchases = getPurchases();
     const PurchasesLogLevel = getPurchasesLogLevel();
+    console.log("[RC DEBUG] configure precheck", {
+      sdkAvailable: Boolean(Purchases),
+      publicSdkKeyPresent: Boolean(revenueCatApiKey),
+    });
     if (!Purchases || !revenueCatApiKey) {
       return;
     }
@@ -70,6 +105,7 @@ export function useRevenueCatController(appUserID, authReady) {
         }
         await Purchases.configure({ apiKey: revenueCatApiKey });
         if (cancelled) return;
+        console.log("[RC DEBUG] configure success");
         configureKeyRef.current = revenueCatApiKey;
         setConfigured(true);
         setLastError(null);
@@ -87,6 +123,7 @@ export function useRevenueCatController(appUserID, authReady) {
           const nextOfferings = await Purchases.getOfferings();
           if (!cancelled) {
             setOfferings(nextOfferings);
+            logPremiumOfferingsDebug("configure:getOfferings", nextOfferings);
           }
         } catch (offeringsError) {
           if (!cancelled) {
@@ -119,7 +156,7 @@ export function useRevenueCatController(appUserID, authReady) {
         listener();
       }
     };
-  }, [revenueCatApiKey]);
+  }, [revenueCatApiKey, logPremiumOfferingsDebug]);
 
   useEffect(() => {
     const Purchases = getPurchases();
@@ -182,6 +219,7 @@ export function useRevenueCatController(appUserID, authReady) {
         const nextOfferings = await Purchases.getOfferings();
         if (!cancelled) {
           setOfferings(nextOfferings);
+          logPremiumOfferingsDebug("loadOfferings", nextOfferings);
         }
       } catch (error) {
         if (!cancelled) {
@@ -195,7 +233,7 @@ export function useRevenueCatController(appUserID, authReady) {
     return () => {
       cancelled = true;
     };
-  }, [isConfigured, offerings]);
+  }, [isConfigured, offerings, logPremiumOfferingsDebug]);
 
   useEffect(() => {
     if (!customerInfo || !appUserID) return;
@@ -232,6 +270,13 @@ export function useRevenueCatController(appUserID, authReady) {
       const Purchases = getPurchases();
       if (!Purchases || !isConfigured) {
         const error = new Error("Purchases not ready. Please try again shortly.");
+        console.log("[RC DEBUG] premium purchase blocked: purchases not ready", {
+          sdkAvailable: Boolean(Purchases),
+          isConfigured,
+          publicSdkKeyPresent: Boolean(revenueCatApiKey),
+          activeAction: busyState.action,
+          hasOfferings: Boolean(offerings),
+        });
         setLastError(error);
         return { success: false, error };
       }
@@ -245,6 +290,15 @@ export function useRevenueCatController(appUserID, authReady) {
         resolveRevenueCatPackage(REVENUECAT_CONFIG.packageIds.premium, offerings) ||
         resolveRevenueCatPackage(REVENUECAT_CONFIG.productIds.premium, offerings) ||
         resolveRevenueCatPackage(target, { current: null, all: {} });
+      logPremiumOfferingsDebug("purchasePackage", offerings);
+      console.log("[RC DEBUG] premium package resolution", {
+        target,
+        fallbackTarget,
+        premiumPackageIdentifier: REVENUECAT_CONFIG.packageIds.premium,
+        premiumPackageFound: Boolean(resolved),
+        resolvedIdentifier:
+          resolved?.identifier || resolved?.packageIdentifier || resolved?.product?.identifier || null,
+      });
       const targetId =
         resolved?.identifier ||
         resolved?.packageIdentifier ||
@@ -275,7 +329,7 @@ export function useRevenueCatController(appUserID, authReady) {
         setBusyState({ busy: false, action: null, targetId: null });
       }
     },
-    [isConfigured, offerings]
+    [isConfigured, offerings, revenueCatApiKey, busyState.action, logPremiumOfferingsDebug]
   );
 
   const restorePurchases = useCallback(async () => {
