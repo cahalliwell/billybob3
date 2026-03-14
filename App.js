@@ -72,104 +72,16 @@ import AuthStackScreen, { linkingConfig } from "./src/auth/AuthStackScreen";
 import { AuthContext, useAuth } from "./src/auth/authContext";
 import useAuthLifecycle from "./src/auth/useAuthLifecycle";
 import { fetchAuthProfileByUserId, signOutUser } from "./src/auth/authHandlers";
-
-let Purchases = null;
-let PurchasesLogLevel = null;
-
-const getGlobalObject = () => {
-  if (typeof globalThis !== "undefined") return globalThis;
-  if (typeof global !== "undefined") return global;
-  if (typeof window !== "undefined") return window;
-  if (typeof self !== "undefined") return self;
-  return {};
-};
-
-const globalRef = getGlobalObject();
-
-const attachRevenueCatModule = (maybeModule) => {
-  if (!maybeModule) return null;
-  const resolved = maybeModule?.default || maybeModule;
-  if (!resolved) return null;
-  if (Purchases === resolved) {
-    return resolved;
-  }
-  Purchases = resolved;
-  PurchasesLogLevel =
-    resolved?.LOG_LEVEL || resolved?.LogLevel || resolved?.LOG_LEVELS || PurchasesLogLevel;
-  return resolved;
-};
-
-const resolveRevenueCatModule = () => {
-  const candidates = [
-    globalRef?.RevenueCatPurchases,
-    globalRef?.RevenueCat?.Purchases,
-    globalRef?.RevenueCat?.PurchasesModule,
-    globalRef?.ExpoModules?.RevenueCatPurchases,
-    globalRef?.ExpoModules?.RevenueCatPurchasesModule,
-    globalRef?.ExpoModulesProxy?.RevenueCatPurchases,
-    globalRef?.NativeModules?.RevenueCatPurchases,
-    globalRef?.expo?.modulesProxy?.RevenueCatPurchases,
-  ];
-
-  for (const candidate of candidates) {
-    const resolved = candidate?.default || candidate;
-    if (resolved && (resolved.configure || resolved.purchasePackage || resolved.purchaseProduct)) {
-      return resolved;
-    }
-  }
-
-  return null;
-};
-
-attachRevenueCatModule(resolveRevenueCatModule());
-
-if (globalRef && !globalRef.__setRevenueCatPurchasesModule) {
-  Object.defineProperty(globalRef, "__setRevenueCatPurchasesModule", {
-    value: (moduleCandidate) => attachRevenueCatModule(moduleCandidate),
-    enumerable: false,
-    configurable: true,
-    writable: true,
-  });
-}
-
-if (!Purchases) {
-  console.log("RevenueCat SDK unavailable: purchases features are disabled by default.");
-}
-
-const readEnv = (key) => {
-  try {
-    if (typeof process !== "undefined" && process?.env && process.env[key] != null) {
-      return process.env[key];
-    }
-  } catch (error) {
-    console.log("Environment read error:", error?.message || error);
-  }
-  return undefined;
-};
-
-const REVENUECAT_CONFIG = {
-  apiKeys: {
-    ios:
-      readEnv("EXPO_PUBLIC_REVENUECAT_IOS_KEY") ||
-      readEnv("REVENUECAT_IOS_API_KEY") ||
-      readEnv("REVENUECAT_API_KEY_IOS") ||
-      "",
-    android:
-      readEnv("EXPO_PUBLIC_REVENUECAT_ANDROID_KEY") ||
-      readEnv("REVENUECAT_ANDROID_API_KEY") ||
-      readEnv("REVENUECAT_API_KEY_ANDROID") ||
-      "",
-  },
-  entitlementIds: {
-    core: "core",
-    premium: "premium",
-  },
-  packageIds: {
-    core: "core_lifetime",
-    premium: "premium_monthly",
-  },
-  offeringId: "default",
-};
+import {
+  REVENUECAT_CONFIG,
+  RevenueCatContext,
+  defaultRevenueCatState,
+  notifyPurchaseOutcome,
+  notifyRestoreOutcome,
+  usePremiumPurchaseFlow,
+  useRevenueCat,
+  useRevenueCatController,
+} from "./src/billing";
 
 const PRIVACY_POLICY_URL = "https://sites.google.com/view/ichinginsightspp/home";
 const TERMS_AND_CONDITIONS_URL = "https://sites.google.com/view/ai-ching-insightstc/home";
@@ -227,426 +139,6 @@ const screenTopPadding = Platform.select({
 });
 
 const createLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-const getRevenueCatApiKey = () => {
-  const platformKey = Platform.select({
-    ios: REVENUECAT_CONFIG.apiKeys.ios,
-    android: REVENUECAT_CONFIG.apiKeys.android,
-    default: REVENUECAT_CONFIG.apiKeys.android || REVENUECAT_CONFIG.apiKeys.ios,
-  });
-  return platformKey && platformKey.trim() ? platformKey.trim() : null;
-};
-
-const collectAllPackages = (offerings) => {
-  if (!offerings) return [];
-  const all = [];
-  const current = offerings.current;
-  if (current?.availablePackages?.length) {
-    all.push(...current.availablePackages);
-  }
-  const others = offerings.all || {};
-  Object.values(others).forEach((offering) => {
-    if (offering?.availablePackages?.length) {
-      offering.availablePackages.forEach((pkg) => all.push(pkg));
-    }
-  });
-  return all;
-};
-
-const resolveRevenueCatPackage = (packageOrId, offerings) => {
-  if (!packageOrId) return null;
-  if (packageOrId?.identifier && packageOrId?.product) {
-    return packageOrId;
-  }
-  const identifier =
-    typeof packageOrId === "string"
-      ? packageOrId
-      : packageOrId?.identifier || packageOrId?.packageIdentifier || packageOrId?.product?.identifier;
-  if (!identifier) return null;
-  const allPackages = collectAllPackages(offerings);
-  if (!allPackages.length) return null;
-  return (
-    allPackages.find((pkg) => {
-      const identifiers = [pkg?.identifier, pkg?.packageIdentifier, pkg?.product?.identifier].filter(Boolean);
-      return identifiers.some((value) => value === identifier);
-    }) || null
-  );
-};
-
-const shouldTreatAsCancellation = (error) => {
-  if (!error) return false;
-  const code = error?.code;
-  const message = String(error?.message || "").toLowerCase();
-  return (
-    Boolean(error?.userCancelled) ||
-    code === "PURCHASE_CANCELLED" ||
-    code === "USER_CANCELLED" ||
-    code === "CANCELLED_PURCHASE" ||
-    message.includes("cancel")
-  );
-};
-
-const notifyPurchaseOutcome = (outcome, messages = {}) => {
-  if (!outcome) return;
-  if (outcome.success) {
-    Alert.alert(
-      messages.successTitle || "Premium unlocked",
-      messages.successMessage || "Your Premium access is now active across all devices."
-    );
-  } else if (outcome.error && !outcome.cancelled) {
-    Alert.alert(
-      messages.errorTitle || "Purchase not completed",
-      outcome.error?.message || messages.errorMessage || "Please try again."
-    );
-  }
-};
-
-const notifyRestoreOutcome = (outcome) => {
-  if (!outcome) return;
-  if (outcome.success) {
-    Alert.alert("Purchases restored", "Your active purchases are now synced on this device.");
-  } else if (outcome.error) {
-    Alert.alert("Restore failed", outcome.error?.message || "Please try again.");
-  }
-};
-
-const defaultRevenueCatState = {
-  ready: false,
-  loading: false,
-  activeAction: null,
-  activeTargetId: null,
-  offerings: null,
-  packages: { premium: null, core: null },
-  premiumPriceString: "",
-  corePriceString: "",
-  purchasePackage: async () => ({ success: false, error: new Error("Purchases unavailable") }),
-  restorePurchases: async () => ({ success: false, error: new Error("Purchases unavailable") }),
-  refreshOfferings: async () => null,
-  premiumActive: false,
-  coreActive: false,
-  activeEntitlementIds: [],
-  customerInfo: null,
-  lastError: null,
-};
-
-const RevenueCatContext = createContext(defaultRevenueCatState);
-
-function useRevenueCat() {
-  return useContext(RevenueCatContext);
-}
-
-function usePremiumPurchaseFlow(successTitle, successMessage) {
-  const { packages, purchasePackage } = useRevenueCat();
-  return useCallback(async () => {
-    const outcome = await purchasePackage(packages?.premium || REVENUECAT_CONFIG.packageIds.premium);
-    notifyPurchaseOutcome(outcome, { successTitle, successMessage });
-    return outcome;
-  }, [packages?.premium, purchasePackage, successTitle, successMessage]);
-}
-
-function useRevenueCatController(appUserID, authReady) {
-  const [isConfigured, setConfigured] = useState(false);
-  const [offerings, setOfferings] = useState(null);
-  const [customerInfo, setCustomerInfo] = useState(null);
-  const [lastError, setLastError] = useState(null);
-  const [busyState, setBusyState] = useState({ busy: false, action: null, targetId: null });
-  const configureKeyRef = useRef(null);
-  const configuringRef = useRef(false);
-  const currentUserRef = useRef(null);
-  const revenueCatApiKey = useMemo(() => getRevenueCatApiKey(), []);
-
-  useEffect(() => {
-    if (!Purchases || !revenueCatApiKey) {
-      return;
-    }
-    if (configureKeyRef.current === revenueCatApiKey || configuringRef.current) {
-      return;
-    }
-    configuringRef.current = true;
-    let cancelled = false;
-
-    const configure = async () => {
-      try {
-        if (Purchases.setLogLevel && PurchasesLogLevel?.WARN != null) {
-          Purchases.setLogLevel(PurchasesLogLevel.WARN);
-        }
-        await Purchases.configure({ apiKey: revenueCatApiKey });
-        if (cancelled) return;
-        configureKeyRef.current = revenueCatApiKey;
-        setConfigured(true);
-        setLastError(null);
-        try {
-          const info = await Purchases.getCustomerInfo();
-          if (!cancelled) {
-            setCustomerInfo(info);
-          }
-        } catch (infoError) {
-          if (!cancelled) {
-            setLastError(infoError);
-          }
-        }
-        try {
-          const nextOfferings = await Purchases.getOfferings();
-          if (!cancelled) {
-            setOfferings(nextOfferings);
-          }
-        } catch (offeringsError) {
-          if (!cancelled) {
-            setLastError(offeringsError);
-          }
-        }
-      } catch (error) {
-        console.log("RevenueCat configure error:", error?.message || error);
-        if (!cancelled) {
-          configureKeyRef.current = null;
-          setConfigured(false);
-          setLastError(error);
-        }
-      } finally {
-        configuringRef.current = false;
-      }
-    };
-
-    configure();
-
-    const listener = Purchases.addCustomerInfoUpdateListener?.((info) => {
-      setCustomerInfo(info);
-    });
-
-    return () => {
-      cancelled = true;
-      if (listener?.remove) {
-        listener.remove();
-      } else if (typeof listener === "function") {
-        listener();
-      }
-    };
-  }, [revenueCatApiKey]);
-
-  useEffect(() => {
-    if (!Purchases || !isConfigured || !authReady) {
-      return;
-    }
-    if (appUserID && currentUserRef.current === appUserID) {
-      return;
-    }
-    if (!appUserID && !currentUserRef.current) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const syncIdentity = async () => {
-      try {
-        if (appUserID) {
-          const result = await Purchases.logIn(appUserID);
-          if (cancelled) return;
-          currentUserRef.current = appUserID;
-          const info = result?.customerInfo || result;
-          if (info) {
-            setCustomerInfo(info);
-          }
-        } else {
-          const info = await Purchases.logOut();
-          if (cancelled) return;
-          currentUserRef.current = null;
-          setCustomerInfo(info);
-        }
-        setLastError(null);
-      } catch (error) {
-        console.log("RevenueCat identity sync error:", error?.message || error);
-        if (!cancelled) {
-          setLastError(error);
-        }
-      }
-    };
-
-    syncIdentity();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [appUserID, authReady, isConfigured]);
-
-  useEffect(() => {
-    if (!Purchases || !isConfigured) {
-      return;
-    }
-    if (offerings) {
-      return;
-    }
-    let cancelled = false;
-
-    const loadOfferings = async () => {
-      try {
-        const nextOfferings = await Purchases.getOfferings();
-        if (!cancelled) {
-          setOfferings(nextOfferings);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setLastError(error);
-        }
-      }
-    };
-
-    loadOfferings();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isConfigured, offerings]);
-
-  useEffect(() => {
-    if (!customerInfo || !appUserID) return;
-    const normalizedAppUser = customerInfo?.appUserID || customerInfo?.originalAppUserId;
-    if (normalizedAppUser && normalizedAppUser !== appUserID) {
-      console.warn(
-        "RevenueCat alias mismatch detected",
-        normalizedAppUser,
-        "expected",
-        appUserID
-      );
-    }
-  }, [customerInfo, appUserID]);
-
-  const refreshOfferings = useCallback(async () => {
-    if (!Purchases || !isConfigured) {
-      return null;
-    }
-    try {
-      const nextOfferings = await Purchases.getOfferings();
-      setOfferings(nextOfferings);
-      setLastError(null);
-      return nextOfferings;
-    } catch (error) {
-      console.log("RevenueCat offerings error:", error?.message || error);
-      setLastError(error);
-      throw error;
-    }
-  }, [isConfigured]);
-
-  const purchasePackage = useCallback(
-    async (target) => {
-      if (!Purchases || !isConfigured) {
-        const error = new Error("Purchases not ready. Please try again shortly.");
-        setLastError(error);
-        return { success: false, error };
-      }
-      const resolved = resolveRevenueCatPackage(target, offerings) ||
-        resolveRevenueCatPackage(target, { current: null, all: {} });
-      const fallbackId = typeof target === "string" ? target : null;
-      const targetId =
-        resolved?.identifier ||
-        resolved?.packageIdentifier ||
-        resolved?.product?.identifier ||
-        fallbackId;
-      if (!resolved) {
-        const error = new Error("Purchase options are unavailable. Please refresh and try again.");
-        setLastError(error);
-        return { success: false, error };
-      }
-      setBusyState({ busy: true, action: "purchase", targetId });
-      try {
-        const result = await Purchases.purchasePackage(resolved);
-        const info = result?.customerInfo || result;
-        if (info) {
-          setCustomerInfo(info);
-        }
-        setLastError(null);
-        return { success: true, result };
-      } catch (error) {
-        if (shouldTreatAsCancellation(error)) {
-          return { success: false, cancelled: true };
-        }
-        console.log("RevenueCat purchase error:", error?.message || error);
-        setLastError(error);
-        return { success: false, error };
-      } finally {
-        setBusyState({ busy: false, action: null, targetId: null });
-      }
-    },
-    [isConfigured, offerings]
-  );
-
-  const restorePurchases = useCallback(async () => {
-    if (!Purchases || !isConfigured) {
-      const error = new Error("Restore unavailable. Please try again later.");
-      setLastError(error);
-      return { success: false, error };
-    }
-    setBusyState({ busy: true, action: "restore", targetId: null });
-    try {
-      const info = await Purchases.restorePurchases();
-      if (info) {
-        setCustomerInfo(info);
-      }
-      setLastError(null);
-      return { success: true, result: info };
-    } catch (error) {
-      console.log("RevenueCat restore error:", error?.message || error);
-      setLastError(error);
-      return { success: false, error };
-    } finally {
-      setBusyState({ busy: false, action: null, targetId: null });
-    }
-  }, [isConfigured]);
-
-  const activeEntitlementIds = useMemo(() => {
-    const active = customerInfo?.entitlements?.active || {};
-    return Object.keys(active);
-  }, [customerInfo?.entitlements?.active]);
-
-  const activeEntitlements = useMemo(() => new Set(activeEntitlementIds), [activeEntitlementIds]);
-
-  const premiumPackage = useMemo(
-    () => resolveRevenueCatPackage(REVENUECAT_CONFIG.packageIds.premium, offerings),
-    [offerings]
-  );
-  const corePackage = useMemo(
-    () => resolveRevenueCatPackage(REVENUECAT_CONFIG.packageIds.core, offerings),
-    [offerings]
-  );
-
-  const contextValue = useMemo(
-    () => ({
-      ready: isConfigured,
-      loading: busyState.busy,
-      activeAction: busyState.action,
-      activeTargetId: busyState.targetId,
-      offerings,
-      packages: { premium: premiumPackage, core: corePackage },
-      premiumPriceString: premiumPackage?.product?.priceString || "",
-      corePriceString: corePackage?.product?.priceString || "",
-      purchasePackage,
-      restorePurchases,
-      refreshOfferings,
-      premiumActive: activeEntitlements.has(REVENUECAT_CONFIG.entitlementIds.premium),
-      coreActive: activeEntitlements.has(REVENUECAT_CONFIG.entitlementIds.core),
-      activeEntitlementIds,
-      customerInfo,
-      lastError,
-    }),
-    [
-      isConfigured,
-      busyState.busy,
-      busyState.action,
-      busyState.targetId,
-      offerings,
-      premiumPackage,
-      corePackage,
-      purchasePackage,
-      restorePurchases,
-      refreshOfferings,
-      activeEntitlements,
-      activeEntitlementIds,
-      customerInfo,
-      lastError,
-    ]
-  );
-
-  return contextValue;
-}
 
 
 // 🔗 Supabase client
@@ -2299,8 +1791,7 @@ function HomeScreen({ navigation, route }) {
   const [disclaimerAgreed, setDisclaimerAgreed] = useState(false);
   const isFocused = useIsFocused();
   const { session, profile, loadingProfile, signOut, refreshProfile } = useAuth();
-  const { premiumActive: premiumEntitlementActive, coreActive: coreEntitlementActive } =
-    useRevenueCat();
+  const { premiumActive: premiumEntitlementActive } = useRevenueCat();
   const {
     visible: guidanceVisible,
     hasSeenGuidance,
@@ -2318,17 +1809,7 @@ function HomeScreen({ navigation, route }) {
   const profileEmail = hasProfile
     ? profile.email || session?.user?.email || "Not set"
     : session?.user?.email || "Not set";
-  const premiumStatusLabel = premiumEntitlementActive
-    ? "Premium"
-    : coreEntitlementActive
-    ? "Core"
-    : hasProfile
-    ? profile.subscription_tier === "premium" || profile.is_premium
-      ? "Premium"
-      : profile.subscription_tier === "core"
-      ? "Core"
-      : "Core"
-    : "Guest";
+  const premiumStatusLabel = premiumEntitlementActive ? "Premium" : "Core";
 
   useEffect(() => {
     if (route?.params?.resetQuestion) {
@@ -4809,42 +4290,29 @@ const stylesGuide = StyleSheet.create({
 
 // 💎 Premium screen
 function PremiumScreen({ navigation }) {
-  const { isPremium: premiumStatus, subscriptionTier } = useAuth();
+  const { isPremium: premiumStatus } = useAuth();
   const {
     packages,
     premiumPriceString,
-    corePriceString,
-    purchasePackage,
     restorePurchases,
     loading: transactionLoading,
     activeAction,
     activeTargetId,
     premiumActive,
-    coreActive,
   } = useRevenueCat();
   const isPremiumMember = Boolean(premiumStatus || premiumActive);
   const startPremiumPurchase = usePremiumPurchaseFlow(
     "Welcome to Premium",
     "Your Premium access is now active. Enjoy the full experience!"
   );
-  const currentTier = isPremiumMember
-    ? "premium"
-    : coreActive || subscriptionTier === "core"
-    ? "core"
-    : subscriptionTier || "core";
+  const currentTier = isPremiumMember ? "premium" : "core";
 
   const premiumPackageRef = packages?.premium;
-  const corePackageRef = packages?.core;
   const premiumPackageId =
     premiumPackageRef?.identifier ||
     premiumPackageRef?.packageIdentifier ||
     premiumPackageRef?.product?.identifier ||
     REVENUECAT_CONFIG.packageIds.premium;
-  const corePackageId =
-    corePackageRef?.identifier ||
-    corePackageRef?.packageIdentifier ||
-    corePackageRef?.product?.identifier ||
-    REVENUECAT_CONFIG.packageIds.core;
 
   const featureMatrix = [
     { label: "Complete hexagram library", core: true, premium: true },
@@ -4857,19 +4325,7 @@ function PremiumScreen({ navigation }) {
 
   const premiumPurchaseBusy =
     transactionLoading && activeAction === "purchase" && activeTargetId === premiumPackageId;
-  const corePurchaseBusy =
-    transactionLoading && activeAction === "purchase" && activeTargetId === corePackageId;
   const restoreBusy = transactionLoading && activeAction === "restore";
-
-  const handleCoreUnlock = useCallback(async () => {
-    const target = corePackageRef || REVENUECAT_CONFIG.packageIds.core;
-    const outcome = await purchasePackage(target);
-    notifyPurchaseOutcome(outcome, {
-      successTitle: "Core unlocked",
-      successMessage: "Core features are now available on your account.",
-    });
-    return outcome;
-  }, [corePackageRef, purchasePackage]);
 
   const handleRestore = useCallback(async () => {
     const outcome = await restorePurchases();
@@ -4880,10 +4336,6 @@ function PremiumScreen({ navigation }) {
   const premiumButtonLabel = premiumPriceString
     ? `Upgrade to Premium (${premiumPriceString})`
     : "Upgrade to Premium";
-  const coreButtonLabel = corePriceString
-    ? `Unlock Core (${corePriceString})`
-    : "Unlock Core";
-  const corePriceLabel = corePriceString || "Loading price…";
   const premiumPriceLabel = premiumPriceString || "Loading price…";
 
   return (
@@ -4906,7 +4358,7 @@ function PremiumScreen({ navigation }) {
                 ]}
               >
                 <Text style={stylesPremium.tierLabel}>Core</Text>
-                <Text style={stylesPremium.price}>{corePriceLabel}</Text>
+                <Text style={stylesPremium.price}>Included with app purchase</Text>
                 <Text style={stylesPremium.priceSub}>One-time unlock</Text>
                 <Text style={stylesPremium.tierBody}>
                   Essential casting, journaling, and the full 64 hexagram library.
@@ -4915,17 +4367,6 @@ function PremiumScreen({ navigation }) {
                   <View style={stylesPremium.badge}>
                     <Text style={stylesPremium.badgeText}>Current plan</Text>
                   </View>
-                ) : null}
-                {!isPremiumMember && !coreActive ? (
-                  <GoldButton
-                    full
-                    kind="secondary"
-                    onPress={handleCoreUnlock}
-                    loading={corePurchaseBusy}
-                    icon={<Ionicons name="shield-checkmark-outline" size={18} color={palette.gold} />}
-                  >
-                    {coreButtonLabel}
-                  </GoldButton>
                 ) : null}
               </View>
               <View
@@ -5590,22 +5031,14 @@ export default function App() {
   const revenueCatValue = useRevenueCatController(session?.user?.id ?? null, authReady);
 
   const premiumStatus = useMemo(
-    () =>
-      revenueCatValue?.premiumActive ||
-      profile?.subscription_tier === "premium" ||
-      profile?.is_premium,
-    [
-      profile?.is_premium,
-      profile?.subscription_tier,
-      revenueCatValue?.premiumActive,
-    ]
+    () => Boolean(revenueCatValue?.premiumActive),
+    [revenueCatValue?.premiumActive]
   );
 
-  const resolvedSubscriptionTier = useMemo(() => {
-    if (revenueCatValue?.premiumActive) return "premium";
-    if (revenueCatValue?.coreActive) return "core";
-    return profile?.subscription_tier ?? null;
-  }, [profile?.subscription_tier, revenueCatValue?.coreActive, revenueCatValue?.premiumActive]);
+  const resolvedSubscriptionTier = useMemo(
+    () => (revenueCatValue?.premiumActive ? "premium" : "core"),
+    [revenueCatValue?.premiumActive]
+  );
 
   const authValue = useMemo(
     () => ({
