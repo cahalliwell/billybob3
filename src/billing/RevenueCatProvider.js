@@ -60,9 +60,15 @@ export function useRevenueCatController(appUserID, authReady) {
           (pkg) => pkg?.identifier || pkg?.packageIdentifier || pkg?.product?.identifier || "unknown"
         )
       );
-      const currentPackageIds = (offeringsPayload?.current?.availablePackages || []).map(
+      const currentPackages = offeringsPayload?.current?.availablePackages || [];
+      const currentPackageIds = currentPackages.map(
         (pkg) => pkg?.identifier || pkg?.packageIdentifier || pkg?.product?.identifier || "unknown"
       );
+      const currentPackagesDetailed = currentPackages.map((pkg) => ({
+        packageIdentifier: pkg?.identifier || pkg?.packageIdentifier || null,
+        productIdentifier: pkg?.product?.identifier || null,
+        priceString: pkg?.product?.priceString || null,
+      }));
       const mergedPackageIds = [...new Set([...currentPackageIds, ...availablePackageIds])];
       const hasRcMonthly = mergedPackageIds.includes(REVENUECAT_CONFIG.packageIds.premium);
       console.log("[RC DEBUG]", sourceLabel, {
@@ -72,7 +78,8 @@ export function useRevenueCatController(appUserID, authReady) {
           allOfferingIds: Object.keys(allOfferings),
         },
         offeringsPayload,
-        currentOfferingIdentifier,
+        offeringsCurrentIdentifier: currentOfferingIdentifier,
+        offeringsCurrentAvailablePackages: currentPackagesDetailed,
         availablePackageIds: mergedPackageIds,
         premiumPackageIdentifier: REVENUECAT_CONFIG.packageIds.premium,
         premiumPackageFound: hasRcMonthly,
@@ -121,6 +128,7 @@ export function useRevenueCatController(appUserID, authReady) {
         }
         try {
           const nextOfferings = await Purchases.getOfferings();
+          console.log("[RC DEBUG] Purchases.getOfferings result (configure)", nextOfferings);
           if (!cancelled) {
             setOfferings(nextOfferings);
             logPremiumOfferingsDebug("configure:getOfferings", nextOfferings);
@@ -217,6 +225,7 @@ export function useRevenueCatController(appUserID, authReady) {
     const loadOfferings = async () => {
       try {
         const nextOfferings = await Purchases.getOfferings();
+        console.log("[RC DEBUG] Purchases.getOfferings result (loadOfferings)", nextOfferings);
         if (!cancelled) {
           setOfferings(nextOfferings);
           logPremiumOfferingsDebug("loadOfferings", nextOfferings);
@@ -255,6 +264,7 @@ export function useRevenueCatController(appUserID, authReady) {
     }
     try {
       const nextOfferings = await Purchases.getOfferings();
+      console.log("[RC DEBUG] Purchases.getOfferings result (refreshOfferings)", nextOfferings);
       setOfferings(nextOfferings);
       setLastError(null);
       return nextOfferings;
@@ -270,7 +280,13 @@ export function useRevenueCatController(appUserID, authReady) {
       const Purchases = getPurchases();
       if (!Purchases || !isConfigured) {
         const error = new Error("Purchases not ready. Please try again shortly.");
+        const notReadyReason = !Purchases
+          ? "sdk_unavailable"
+          : !isConfigured
+          ? "sdk_not_configured"
+          : "unknown_not_ready";
         console.log("[RC DEBUG] premium purchase blocked: purchases not ready", {
+          notReadyReason,
           sdkAvailable: Boolean(Purchases),
           isConfigured,
           publicSdkKeyPresent: Boolean(revenueCatApiKey),
